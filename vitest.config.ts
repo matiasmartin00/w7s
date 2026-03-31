@@ -1,0 +1,14 @@
+import { defineConfig } from "vitest/config"
+
+export default defineConfig({
+  test: {
+    root: "src",
+    globals: true,
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov"],
+      include: ["src/**/*.ts"],
+      exclude: ["src/**/*.test.ts", "src/**/*.d.ts"],
+    },
+  },
+})

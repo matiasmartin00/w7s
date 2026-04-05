@@ -148,6 +148,48 @@ function formatListResult(result: ReturnType<typeof listWorkflows>): string {
   return lines.join("\n").trimEnd()
 }
 
+// --- Plugin logger helper ---
+
+type PluginLogLevel = "debug" | "info" | "warn" | "error"
+
+type PluginLogger = {
+  debug: (message: string, extra?: Record<string, unknown>) => Promise<void>
+  info: (message: string, extra?: Record<string, unknown>) => Promise<void>
+  warn: (message: string, extra?: Record<string, unknown>) => Promise<void>
+  error: (message: string, extra?: Record<string, unknown>) => Promise<void>
+}
+
+function createPluginLogger(
+  client: PluginInput["client"],
+  service = "w7s-plugin",
+): PluginLogger {
+  const send = async (
+    level: PluginLogLevel,
+    message: string,
+    extra?: Record<string, unknown>,
+  ): Promise<void> => {
+    try {
+      await client.app.log({
+        body: {
+          service,
+          level,
+          message,
+          ...(extra && Object.keys(extra).length > 0 ? { extra } : {}),
+        },
+      })
+    } catch {
+      // Swallow logging failures to avoid impacting plugin behavior.
+    }
+  }
+
+  return {
+    debug: (message, extra) => send("debug", message, extra),
+    info: (message, extra) => send("info", message, extra),
+    warn: (message, extra) => send("warn", message, extra),
+    error: (message, extra) => send("error", message, extra),
+  }
+}
+
 // --- Approval handler factory ---
 
 /**
@@ -178,9 +220,14 @@ function createApprovalHandler(client: PluginInput["client"]): ApprovalHandler {
 // --- Plugin entry point ---
 
 export const w7s = async (ctx: PluginInput): Promise<Hooks> => {
+  const logger = createPluginLogger(ctx.client)
+
+  await logger.info("Plugin initializing")
+
   // 1. Resolve workflow directories
   const localDir = join(ctx.directory, ".opencode", "workflows")
-  const globalDir = join(homedir(), ".opencode", "workflows")
+  const globalDir = join(homedir(), ".config/opencode", "workflows")
+  await logger.info("Resolved workflow directories", { localDir, globalDir })
 
   // 2. Load workflows from both directories
   const loadResult = loadWorkflows(localDir, globalDir)
@@ -188,8 +235,18 @@ export const w7s = async (ctx: PluginInput): Promise<Hooks> => {
 
   // Log any load errors (non-fatal — valid workflows still load)
   for (const err of loadErrors) {
-    console.error(`[w7s] Load error (${err.type}): ${err.file} — ${err.error}`)
+    await logger.error("Workflow load error", {
+      type: err.type,
+      file: err.file,
+      error: err.error,
+    })
   }
+
+  await logger.info("Workflow loading complete", {
+    loadedCount: loadResult.workflows.size,
+    wokflows: Array.from(loadResult.workflows.keys()),
+    errorCount: loadErrors.length,
+  })
 
   // 3. Populate the registry
   const registry = new WorkflowRegistry()
@@ -200,7 +257,7 @@ export const w7s = async (ctx: PluginInput): Promise<Hooks> => {
   const registeredCount = loadResult.workflows.size
   if (registeredCount > 0) {
     const names = Array.from(loadResult.workflows.keys()).join(", ")
-    console.log(`[w7s] Loaded ${registeredCount} workflow(s): ${names}`)
+    await logger.info("Workflows loaded", { count: registeredCount, names })
   }
 
   // 4. Create step executors
@@ -214,21 +271,30 @@ export const w7s = async (ctx: PluginInput): Promise<Hooks> => {
 
   // 6. Create execution logger
   const runsDir = join(ctx.directory, ".opencode", "workflows", ".runs")
-  const logger = new ExecutionLogger(runsDir)
+  const executionLogger = new ExecutionLogger(runsDir)
+
+  await logger.info("Plugin initialized, hooks ready")
 
   // 7. Return hooks
   return {
     "command.execute.before": async (input, output) => {
       const { command, arguments: args } = input
+      await logger.info("command.execute.before fired", { command, args })
 
+      // Normalize: strip leading "/" if present for matching
+      const cmd = command.startsWith("/") ? command.slice(1) : command
+
+      await logger.info("Processing command", { cmd })
       // --- Management commands: /w7s <subcommand> ---
-      if (command === "/w7s" || command === "w7s") {
+      if (cmd === "w7s") {
         const trimmed = (args ?? "").trim()
         const parts = trimmed.split(/\s+/)
         const subcommand = parts[0] ?? ""
         const subArgs = parts.slice(1).join(" ")
 
         let text: string
+
+        await logger.info("Processing w7s subcommand", { subcommand, subArgs })
 
         switch (subcommand) {
           case "list": {
@@ -276,19 +342,32 @@ export const w7s = async (ctx: PluginInput): Promise<Hooks> => {
           }
         }
 
+        await logger.info("Subcommand result", { subcommand, text })
         // Set output parts to display result and prevent default processing
         output.parts = [{ type: "text", text } as (typeof output.parts)[number]]
         return
       }
 
       // --- Workflow trigger commands ---
-      const triggerCommand = command.startsWith("/") ? command : `/${command}`
+      // Always match with "/" prefix since workflow triggers are defined as "/hello"
+      const triggerCommand = `/${cmd}`
+      await logger.debug("Looking up workflow trigger", { triggerCommand })
       const workflow: Workflow | undefined = registry.getByTrigger(triggerCommand)
 
       if (!workflow) {
         // Not a workflow trigger — pass through to default processing
+        const registered = registry.list().map((e) => e.name)
+        await logger.info("No workflow found for trigger", {
+          triggerCommand,
+          registered,
+        })
         return
       }
+
+      await logger.info("Workflow found for trigger", {
+        triggerCommand,
+        workflow: workflow.name,
+      })
 
       // Parse inputs from command arguments
       const inputs = parseInputs(args ?? "")
@@ -298,12 +377,13 @@ export const w7s = async (ctx: PluginInput): Promise<Hooks> => {
 
       // Log the result
       try {
-        await logger.writeLog(workflow.name, result, inputs)
-        await logger.rotate(workflow.name)
+        await executionLogger.writeLog(workflow.name, result, inputs)
+        await executionLogger.rotate(workflow.name)
       } catch (logErr) {
-        console.error(
-          `[w7s] Failed to write log: ${logErr instanceof Error ? logErr.message : String(logErr)}`,
-        )
+        await logger.error("Failed to write execution log", {
+          error:
+            logErr instanceof Error ? logErr.message : String(logErr),
+        })
       }
 
       // Format and return result

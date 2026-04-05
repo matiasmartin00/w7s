@@ -13,6 +13,8 @@
   },
   "scripts": {
     "build": "tsc",
+    "bundle": "esbuild src/index.ts --bundle --format=esm --platform=node --target=esnext --external:@opencode-ai/plugin --external:yaml --external:zod --outfile=bundle/w7s.js",
+    "deploy": "npm run bundle && cp bundle/w7s.js ~/.config/opencode/plugins/w7s.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src/",
@@ -25,6 +27,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "esbuild": "^0.27.4",
     "eslint": "^9.0.0",
     "typescript": "^5.8.0",
     "vitest": "^3.1.0"

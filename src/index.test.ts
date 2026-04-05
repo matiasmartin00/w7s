@@ -54,6 +54,7 @@ function createMockCtx(overrides: Partial<{
     },
     app: {
       agents: vi.fn().mockResolvedValue({ data: [] }),
+      log: vi.fn().mockResolvedValue({}),
     },
   } as unknown as PluginInput["client"]
 
